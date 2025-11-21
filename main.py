@@ -12,28 +12,14 @@ import win32con
 import hashlib
 import threading
 import requests
-
-def fetch_password_from_server():
-    try:
-        url = "https://your-service.onrender.com/get_password"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            return response.json().get("password")
-        else:
-            print("Ошибка:", response.status_code, response.text)
-            return None
-    except Exception as e:
-        print("Ошибка при подключении к серверу:", e)
-        return None
-
+import os
 
 # ---------------- CONFIG ----------------
-API_KEY = "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"
+API_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = "gpt-5"
 INTERVAL = 1.0
 RIGHT_SHIFT_KEY = "right shift"
 ACTIVATION_KEY = "home"          # Клавиша, после нажатия которой вводится пароль
-PASSWORD = fetch_password_from_server(RENDER_URL, SECRET_TOKEN)              # <- твой пароль
 
 KEY_MAP = {
     "A": 0x90,  # NumLock
@@ -209,5 +195,5 @@ def main():
 
 # ---------- Точка входа ----------
 if __name__ == "__main__":
-    if wait_for_password():
-        main()
+    main()
+
