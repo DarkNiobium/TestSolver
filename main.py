@@ -9,17 +9,19 @@ from openai import OpenAI
 import keyboard
 import win32api
 import win32con
+import win32gui
 import hashlib
 import threading
 import requests
 import os
+import ctypes
+from ctypes import wintypes
 
 # ---------------- CONFIG ----------------
 API_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = "gpt-5"
 INTERVAL = 1.0
-RIGHT_SHIFT_KEY = "right shift"
-ACTIVATION_KEY = "home"          # Клавиша, после нажатия которой вводится пароль
+SCREENSHOT_KEY = "middle mouse"  # Средняя кнопка мыши для скриншота и запуска
 
 KEY_MAP = {
     "A": 0x90,  # NumLock
@@ -34,6 +36,40 @@ and return EXACTLY one option letter (A, B, C, D, ...) or "?" if unclear. Output
 """
 
 client = OpenAI(api_key=API_KEY)
+
+# ---------- Курсор ----------
+class CursorManager:
+    def __init__(self):
+        self.original_cursor = None
+        self.loading_cursor = None
+        self._setup_cursors()
+    
+    def _setup_cursors(self):
+        # Сохраняем текущий курсор
+        self.original_cursor = win32gui.LoadCursor(0, win32con.IDC_ARROW)
+        
+        # Создаем простой курсор загрузки (песочные часы)
+        self.loading_cursor = win32gui.LoadCursor(0, win32con.IDC_WAIT)
+    
+    def set_loading_cursor(self):
+        """Установить курсор загрузки"""
+        if self.loading_cursor:
+            win32gui.SetCursor(self.loading_cursor)
+            ctypes.windll.user32.SetCursor(self.loading_cursor)
+    
+    def set_normal_cursor(self):
+        """Восстановить нормальный курсор"""
+        if self.original_cursor:
+            win32gui.SetCursor(self.original_cursor)
+            ctypes.windll.user32.SetCursor(self.original_cursor)
+    
+    def set_system_cursor(self, cursor_name):
+        """Установить системный курсор"""
+        cursor = win32gui.LoadCursor(0, cursor_name)
+        win32gui.SetCursor(cursor)
+        ctypes.windll.user32.SetCursor(cursor)
+
+cursor_manager = CursorManager()
 
 # ---------- Индикация ----------
 def get_toggle_state(vk_code: int) -> bool:
@@ -80,36 +116,15 @@ def blink_error(times=3, delay=0.15):
         set_indicator({KEY_MAP["A"]: False, KEY_MAP["B"]: False, KEY_MAP["C"]: False})
         time.sleep(delay)
 
-# ---------- Авторизация ----------
-def wait_for_password():
-    print(f"Ожидание нажатия {ACTIVATION_KEY} для ввода пароля...")
-
-    while True:
-        keyboard.wait(ACTIVATION_KEY)  # ждём нажатия клавиши Home
-        print("Ввод пароля начался (вводи, не обязательно в консоли):")
-
-        typed = ""
-        while True:
-            event = keyboard.read_event(suppress=False)
-            if event.event_type == keyboard.KEY_DOWN:
-                if event.name == "enter":
-                    break
-                elif event.name == "backspace":
-                    typed = typed[:-1]
-                elif len(event.name) == 1:
-                    typed += event.name
-                # выводим * в консоль для отладки
-                print("*" * len(typed), end="\r", flush=True)
-
-        if typed == PASSWORD:
-            print("\nПароль верный! Активация...")
-            blink_all(2, 0.2)
-            return True
-        else:
-            print("\nНеверный пароль.")
-            blink_error(3, 0.15)
-            time.sleep(0.5)
-            print(f"Попробуй снова, нажми {ACTIVATION_KEY} для нового ввода.")
+# ---------- Скриншот ----------
+def take_screenshot():
+    """Сделать скриншот всего экрана"""
+    try:
+        screenshot = ImageGrab.grab()
+        return screenshot
+    except Exception as e:
+        print(f"Ошибка при создании скриншота: {e}")
+        return None
 
 # ---------- Модель ----------
 def image_to_base64(img):
@@ -135,65 +150,85 @@ def send_request_get_letter(img_b64):
             return ch.upper()
     return "?"
 
-def get_clipboard_image():
-    img = ImageGrab.grabclipboard()
-    return img if img else None
+def process_screenshot():
+    """Обработать скриншот и получить ответ от модели"""
+    print("Создание скриншота...")
+    
+    # Делаем скриншот
+    img = take_screenshot()
+    if not img:
+        print("Не удалось создать скриншот.")
+        blink_error()
+        return None
+    
+    # Конвертируем в base64
+    b64, png_bytes = image_to_base64(img)
+    h = img_hash(png_bytes)
+    
+    print("Скриншот создан, отправка в модель...")
+    
+    # Устанавливаем курсор загрузки
+    cursor_manager.set_loading_cursor()
+    
+    try:
+        # Отправляем запрос к модели
+        letter = send_request_get_letter(b64)
+        print("Ответ модели:", letter)
+        return letter
+    except Exception as e:
+        print("Ошибка при обращении к модели:", e)
+        blink_error()
+        return None
+    finally:
+        # Восстанавливаем нормальный курсор
+        cursor_manager.set_normal_cursor()
 
-def loading_animation(stop_event):
-    blink_state = False
-    vk_list = [KEY_MAP["A"], KEY_MAP["B"], KEY_MAP["C"]]
+def loading_cursor_handler(stop_event):
+    """Обработчик для анимации курсора загрузки"""
     while not stop_event.is_set():
-        blink_state = not blink_state
-        target = {vk: blink_state for vk in vk_list}
-        set_indicator(target)
-        time.sleep(1)
-    set_indicator({vk: False for vk in vk_list})
+        cursor_manager.set_loading_cursor()
+        time.sleep(0.1)
 
 # ---------- Основной цикл ----------
 def main():
-    print("TestSolver активирован. Копируй картинку и зажимай Right Shift.")
+    print(f"TestSolver активирован. Нажми '{SCREENSHOT_KEY}' для создания скриншота и обработки.")
     last_hash = None
-    while True:
-        try:
-            if not keyboard.is_pressed(RIGHT_SHIFT_KEY):
-                time.sleep(INTERVAL)
-                continue
-
-            img = get_clipboard_image()
-            if not img:
-                print("В буфере нет изображения.")
-                time.sleep(0.5)
-                continue
-
-            b64, png_bytes = image_to_base64(img)
-            h = img_hash(png_bytes)
-            if h == last_hash:
-                print("Та же картинка — пропускаю.")
-                time.sleep(0.5)
-                continue
-
-            print("Картинка найдена, отправка...")
-            stop_event = threading.Event()
-            anim_thread = threading.Thread(target=loading_animation, args=(stop_event,), daemon=True)
-            anim_thread.start()
-
-            letter = send_request_get_letter(b64)
-
-            stop_event.set()
-            anim_thread.join()
-            
-            print("Ответ модели:", letter)
+    
+    def on_middle_click(e):
+        """Обработчик нажатия средней кнопки мыши"""
+        if e.event_type == keyboard.KEY_DOWN and e.name == 'middle mouse':
+            # Запускаем в отдельном потоке, чтобы не блокировать интерфейс
+            thread = threading.Thread(target=process_and_display, daemon=True)
+            thread.start()
+    
+    def process_and_display():
+        """Обработать скриншот и отобразить результат"""
+        nonlocal last_hash
+        letter = process_screenshot()
+        if letter:
             light_for_letter(letter)
-            last_hash = h
-
-        except KeyboardInterrupt:
-            print("Выход по Ctrl+C")
-            break
-        except Exception as e:
-            print("Ошибка:", e)
-        time.sleep(0.2)
+            # Сохраняем хэш для предотвращения повторной обработки
+            # В данном случае хэш не используется, так как каждый скриншот уникален
+        else:
+            blink_error()
+    
+    # Регистрируем обработчик средней кнопки мыши
+    keyboard.hook(on_middle_click)
+    
+    print("Сервис запущен. Используйте среднюю кнопку мыши для создания скриншота.")
+    print("Для выхода нажмите Ctrl+C")
+    
+    try:
+        # Бесконечный цикл для поддержания работы программы
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Выход по Ctrl+C")
+    finally:
+        # Восстанавливаем курсор и отключаем обработчик
+        cursor_manager.set_normal_cursor()
+        keyboard.unhook_all()
 
 # ---------- Точка входа ----------
 if __name__ == "__main__":
     main()
-
